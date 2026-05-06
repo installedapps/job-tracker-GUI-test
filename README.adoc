@@ -1,0 +1,105 @@
+= Job Tracker
+:toc: macro
+:toclevels: 2
+:icons: font
+:source-highlighter: rouge
+:sectanchors:
+:experimental:
+
+image:https://img.shields.io/badge/Rust-2021-f74c00?logo=rust&logoColor=white[Status]
+image:https://img.shields.io/badge/UI-iced-5aa9e6[UI]
+image:https://img.shields.io/badge/storage-SQLite-2f6f9f?logo=sqlite&logoColor=white[SQLite]
+
+Job Tracker is a dark, local-first Rust desktop app for managing job applications,
+notes, dates, pipeline status, and visual progress without sending your search
+data anywhere.
+
+toc::[]
+
+== Highlights
+
+[cols="1,2", frame=none, grid=rows]
+|===
+|Local-first storage |Applications are stored in SQLite on your machine.
+|Focused workflow |Applications and Stats live in separate tabs.
+|Pipeline tracking |Track Applied, Interviewing, Rejected, and Pending states.
+|Calendar input |Add application dates with an inline calendar.
+|Visual feedback |Review animated status bars, summary stats, and a heatmap.
+|SVG export |Export a Sankey-style view of the job pipeline.
+|===
+
+== Quick Start
+
+=== Prerequisites
+
+* Rust stable toolchain
+* A desktop environment supported by `iced`
+
+=== Run
+
+[source,bash]
+----
+cargo run
+----
+
+=== Test
+
+[source,bash]
+----
+cargo test
+cargo clippy --all-targets -- -D warnings
+----
+
+== Data Location
+
+The app stores its SQLite database in the platform app data directory via the
+`directories` crate. Sankey exports are written beside that data file as:
+
+[source,text]
+----
+job-pipeline-sankey.svg
+----
+
+== Architecture
+
+[cols="1,2", options="header", stripes=even]
+|===
+|Area |Files
+
+|Domain
+|`src/model`, `src/stats.rs`, `src/heatmap.rs`, `src/sankey.rs`
+
+|Persistence
+|`src/repository`
+
+|Application state
+|`src/app.rs`, `src/app_actions.rs`, `src/app_export.rs`
+
+|UI
+|`src/ui`
+
+|Tests
+|`tests/*_tests.rs`
+|===
+
+== Repository Layout
+
+[source,text]
+----
+.
+|-- Cargo.toml
+|-- Cargo.lock
+|-- README.adoc
+|-- src/
+|   |-- app.rs
+|   |-- repository/
+|   |-- model/
+|   `-- ui/
+`-- tests/
+----
+
+== Notes
+
+The UI keeps animation work scoped to the Stats tab so the app does not redraw
+unnecessarily while managing applications. Sankey export runs through an Iced
+task so file writing does not block the update loop.

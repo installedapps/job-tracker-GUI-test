@@ -1,0 +1,12 @@
+/target/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*.swo
+
+# Local app/runtime data
+*.db
+*.sqlite
+*.sqlite3
+job-pipeline-sankey.svg
