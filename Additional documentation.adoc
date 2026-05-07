@@ -1,0 +1,2252 @@
+= Job Tracker Iced Rust App Review
+:toc:
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: rouge
+
+== Review Scope
+
+Repository reviewed:
+
+* `https://github.com/installedapps/job-tracker-GUI-test`
+
+This is a static review based on the GitHub source files. I did not run the app, compile it, or execute the tests locally, so the rating focuses on structure, code organisation, apparent `iced` usage, maintainability, and extensibility.
+
+== Overall Rating
+
+.Score
+[cols="1,1,3", options="header"]
+|===
+|Area |Rating |Comment
+
+|Project structure
+|8/10
+|The app is split into sensible modules: app state, app actions, export logic, domain models, repository code, UI state, and UI rendering modules.
+
+|Rust idiom
+|7.5/10
+|The code uses enums, traits, modules, `Result`, and small helper types well. Some parts could become more generic or configurable as the app grows.
+
+|Iced architecture
+|7.5/10
+|The app follows a clear `Message -> update -> view` structure. The UI is mostly separated into files, which is good. It could become even cleaner by introducing reusable components and theme constants.
+
+|UI maintainability
+|7/10
+|Colours and styles are mostly centralised, but layout values such as padding, spacing, widths, and text sizes are still scattered through UI files.
+
+|Persistence design
+|8/10
+|The repository trait and SQLite implementation are a strong choice for a small local-first app.
+
+|Extensibility
+|7/10
+|Adding new panels, statuses, or visual components is straightforward, but there are a few places that must be updated together.
+
+|===
+
+=== Final rating
+
+`7.5 / 10`
+
+This is a solid small GUI app. It is clearly beyond a throwaway beginner project because it already separates domain logic, UI rendering, persistence, and state. The biggest improvement area is not correctness, but making the UI theme/layout more centralised and making future features less likely to require editing many files at once.
+
+== What the App Currently Does
+
+The app is a local-first desktop job application tracker built with Rust, `iced`, and SQLite. It lets the user:
+
+* Add job applications.
+* Edit existing applications.
+* Delete applications.
+* Track company, role title, status, application date, and comments.
+* Use a small calendar dropdown to choose a date.
+* Switch between an Applications panel and a Stats panel.
+* View status counts and progress bars.
+* View a small heatmap of application activity.
+* Export a Sankey-style SVG summary of the pipeline.
+* Store data locally in a SQLite database.
+
+== Architecture Summary
+
+The structure is good because it avoids putting everything in `main.rs`.
+
+[source,text]
+----
+src/
+├── app.rs
+├── app_actions.rs
+├── app_defaults.rs
+├── app_export.rs
+├── error.rs
+├── heatmap.rs
+├── lib.rs
+├── main.rs
+├── message.rs
+├── paths.rs
+├── sankey.rs
+├── stats.rs
+├── model/
+├── repository/
+├── ui/
+└── ui_state/
+----
+
+The app has three broad layers:
+
+[cols="1,2,2", options="header"]
+|===
+|Layer |Main files |Purpose
+
+|Application layer
+|`app.rs`, `app_actions.rs`, `app_export.rs`, `message.rs`
+|Holds app state, handles messages, performs save/edit/delete/export actions, and decides which view to show.
+
+|Domain/data layer
+|`model/`, `stats.rs`, `heatmap.rs`, `sankey.rs`
+|Defines jobs, statuses, form validation, statistics, heatmap data, and SVG generation.
+
+|Infrastructure layer
+|`repository/`, `paths.rs`, `error.rs`
+|Handles SQLite storage, database schema, row mapping, app data paths, and app-wide errors.
+
+|UI layer
+|`ui/`, `ui_state/`
+|Builds the visible interface and holds non-database UI state such as selected panel, animation step, and calendar state.
+
+|===
+
+== File-by-File Description
+
+=== `src/main.rs`
+
+This is the entry point.
+
+It declares the application-side modules and calls:
+
+[source,rust]
+----
+app::run()
+----
+
+This is clean because `main.rs` does not contain UI code, database code, or state update logic.
+
+To change startup behaviour, window title, theme, or app initialization, do not edit `main.rs` first. Go to `app.rs`.
+
+=== `src/app.rs`
+
+This is the centre of the `iced` application.
+
+Responsibilities:
+
+* Defines `JobTracker`, the main application state struct.
+* Opens the SQLite repository on startup.
+* Loads jobs from the database.
+* Defines the `update` function for handling `Message` values.
+* Defines the `view` function by delegating to `ui::view(self)`.
+* Defines the app subscription used for stats animation ticks.
+* Sets the app theme to `Theme::Dark`.
+
+Important state fields:
+
+[source,rust]
+----
+pub struct JobTracker {
+    pub repository: Option<SqliteJobRepository>,
+    pub jobs: Vec<Job>,
+    pub form: JobForm,
+    pub notice: Option<String>,
+    pub active_panel: ActivePanel,
+    pub animation: AnimationState,
+    pub calendar: CalendarState,
+    pub calendar_open: bool,
+}
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change app title
+|Change `.title("Job Tracker")` inside `run()`.
+
+|Change dark/light theme
+|Change `app_theme()` from `Theme::Dark` to another `iced::Theme`.
+
+|Add new global state
+|Add a field to `JobTracker`.
+
+|Handle a new user action
+|Add a variant to `Message`, then handle it in `update()`.
+
+|Add a recurring animation/timer
+|Extend `subscription()`.
+
+|===
+
+Current design comment:
+
+The `update()` function is still manageable. As more features are added, it may become long. You have already started solving this by moving business actions into `app_actions.rs` and export logic into `app_export.rs`.
+
+=== `src/app_actions.rs`
+
+This file contains the main business actions attached to `JobTracker`.
+
+Responsibilities:
+
+* Convert the form into a `Job`.
+* Save a new job.
+* Update an existing job.
+* Edit a job by loading its values into the form.
+* Delete a job.
+* Clear the form.
+* Select a calendar day.
+* Reload the job list after database changes.
+
+Important methods:
+
+[source,rust]
+----
+save_job()
+edit_job(id)
+delete_job(id)
+clear_form()
+select_day(day)
+persist_job(job)
+reload_after(result, message)
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add validation-related behaviour after save
+|`save_job()` or `persist_job()`.
+
+|Change the notice text after saving
+|`persist_job()`.
+
+|Change what happens after delete
+|`delete_job()` or `reload_after()`.
+
+|Reset more UI state after saving
+|`clear_form()`.
+
+|Make edit mode open a side panel
+|`edit_job()` and `JobTracker` state.
+
+|===
+
+Potential improvement:
+
+`reload_after()` uses `self.repository.as_ref().unwrap()` after already assuming a repository exists. It is probably safe in the current flow, but avoiding `unwrap()` would make the app more robust.
+
+A safer approach would be:
+
+[source,rust]
+----
+if let Some(repository) = &self.repository {
+    // load jobs
+} else {
+    self.notice = Some("Database is not available.".into());
+}
+----
+
+=== `src/app_defaults.rs`
+
+This file defines default startup UI state.
+
+Responsibilities:
+
+* Creates the initial calendar state from today's local date.
+* Provides a fallback date if parsing fails.
+
+Current fallback:
+
+[source,rust]
+----
+CalendarState::from_date("2026-05-05").unwrap()
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change default selected calendar date
+|`initial_calendar()`.
+
+|Avoid hardcoded fallback date
+|Change `fallback_calendar()`.
+
+|Use UTC instead of local time
+|Replace `chrono::Local` with appropriate chrono/time handling.
+
+|===
+
+Potential improvement:
+
+The hardcoded fallback date is fine for testing, but slightly odd in production. A better fallback could use a known safe date such as `"1970-01-01"` or return a `Result` upward instead of unwrapping.
+
+=== `src/app_export.rs`
+
+This file handles exporting the pipeline SVG.
+
+Responsibilities:
+
+* Build a `SankeyGraph` from current job stats.
+* Convert it to SVG text.
+* Write it to disk asynchronously through `iced::Task`.
+* Show success/failure notice after export.
+
+Important method:
+
+[source,rust]
+----
+export_sankey()
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change the export path
+|Usually `paths.rs`, not this file.
+
+|Change SVG content
+|`sankey.rs`.
+
+|Add CSV export
+|Add a new `Message::ExportCsv`, then create similar logic here.
+
+|Add JSON backup/export
+|Add a new export function here and serialization dependency if needed.
+
+|===
+
+Good design choice:
+
+Using `Task::perform` keeps the file-writing operation out of the synchronous update loop.
+
+=== `src/message.rs`
+
+This defines the app's event vocabulary.
+
+Responsibilities:
+
+* Lists every user action or internal event the app can react to.
+
+Examples:
+
+[source,rust]
+----
+CompanyChanged(String)
+SaveJob
+EditJob(i64)
+ShowPanel(ActivePanel)
+ExportSankey
+ToggleCalendar
+PreviousMonth
+NextMonth
+Tick
+----
+
+What to change here:
+
+Add a new `Message` variant whenever the UI needs to trigger a new action.
+
+Examples:
+
+[source,rust]
+----
+SearchChanged(String)
+FilterStatusChanged(Option<Status>)
+ShowPanel(ActivePanel)
+ExportCsv
+----
+
+Then handle it in `JobTracker::update()`.
+
+=== `src/paths.rs`
+
+This handles data file locations.
+
+Responsibilities:
+
+* Finds the platform-specific application data directory.
+* Returns the SQLite database path.
+* Returns the Sankey SVG export path.
+* Falls back to the current directory if an app data directory is not available.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Rename the SQLite file
+|`database_path()`.
+
+|Rename the SVG export file
+|`sankey_export_path()`.
+
+|Change the app directory identity
+|`ProjectDirs::from("com", "local", "job-tracker")`.
+
+|===
+
+Potential improvement:
+
+The organisation/application identifiers are currently generic. For a polished app, use a more unique identifier.
+
+=== `src/error.rs`
+
+This defines the app-wide error type.
+
+Responsibilities:
+
+* Wrap database errors.
+* Wrap file errors.
+* Represent invalid statuses.
+* Represent missing job IDs.
+* Represent validation errors.
+
+This is a good use of `thiserror`.
+
+What to change here:
+
+Add new variants when new parts of the app can fail.
+
+Examples:
+
+[source,rust]
+----
+#[error("export error: {0}")]
+Export(String)
+
+#[error("import error: {0}")]
+Import(String)
+----
+
+=== `src/lib.rs`
+
+This exposes the library side of the project.
+
+Responsibilities:
+
+* Declares domain, repository, stats, heatmap, sankey, and UI-state modules.
+* Re-exports important public types.
+
+This is useful because tests can import the application logic as a library instead of needing to go through the binary.
+
+What to change here:
+
+When adding a new domain type that needs to be used across the app, export it here.
+
+Example:
+
+[source,rust]
+----
+pub use model::{Job, JobForm, Status, StatusColours, Priority};
+----
+
+== Domain Model Files
+
+=== `src/model/mod.rs`
+
+This module file connects the model submodules.
+
+Likely responsibilities:
+
+* Declares `job.rs` and `status.rs`.
+* Re-exports `Job`, `JobForm`, `Status`, and `StatusColours`.
+
+What to change here:
+
+When adding a new model file, such as `priority.rs`, add it here and re-export the type if needed.
+
+=== `src/model/job.rs`
+
+This file defines job data and form data.
+
+Responsibilities:
+
+* Defines the stored `Job`.
+* Defines the editable `JobForm`.
+* Converts from `Job` to `JobForm`.
+* Converts from `JobForm` to `Job`.
+* Validates required fields.
+* Validates date format.
+
+Important types:
+
+[source,rust]
+----
+pub struct Job
+pub struct JobForm
+----
+
+Important methods:
+
+[source,rust]
+----
+Job::new(...)
+JobForm::from_job(...)
+JobForm::to_job()
+JobForm::is_editing()
+JobForm::clear()
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add a new field like salary
+|Add it to both `Job` and `JobForm`.
+
+|Make a field required
+|Update `validate()`.
+
+|Change default status
+|Change `JobForm::default()`.
+
+|Change trimming behaviour
+|Update `to_job()` and/or `Job::new()`.
+
+|Allow optional date
+|Change `to_job()` and database schema.
+
+|===
+
+Example: adding a `location` field
+
+You would need to update:
+
+* `Job`
+* `JobForm`
+* `JobForm::default()`
+* `JobForm::from_job()`
+* `JobForm::to_job()`
+* `validate()` if location should be required
+* SQLite schema
+* SQLite insert/update/load code
+* Form UI
+* Job row UI
+
+=== `src/model/status.rs`
+
+This file defines the job pipeline statuses.
+
+Current statuses:
+
+* `Applied`
+* `Interviewing`
+* `Rejected`
+* `Pending`
+
+Responsibilities:
+
+* Defines `Status`.
+* Converts status to database string.
+* Converts database string back to `Status`.
+* Defines the display label.
+* Defines status-specific colours.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add a new status
+|Add a new enum variant.
+
+|Change display text
+|Update the `Display` implementation.
+
+|Change DB value
+|Update `as_db_value()` and `from_db_value()`.
+
+|Change badge/progress colours
+|Update `colours()`.
+
+|Change status order
+|Change `Status::all()`.
+
+|===
+
+Example: adding `Offer`
+
+[source,rust]
+----
+pub enum Status {
+    Applied,
+    Interviewing,
+    Offer,
+    Rejected,
+    Pending,
+}
+----
+
+Then update:
+
+* `Status::all()`
+* `as_db_value()`
+* `from_db_value()`
+* `colours()`
+* `Display`
+* Any stats UI that assumes four statuses
+* `Stats` counts array if it is fixed to four items
+
+Important warning:
+
+`Stats` currently stores `counts: [(Status, usize); 4]`. If you add a fifth status, you must update that logic too. Better long-term design would use a `Vec<(Status, usize)>` or derive the count collection from `Status::all()` without hardcoding array length in multiple places.
+
+== Repository Files
+
+=== `src/repository/mod.rs`
+
+This defines the persistence abstraction.
+
+Responsibilities:
+
+* Declares repository submodules.
+* Defines the `JobRepository` trait.
+* Re-exports `SqliteJobRepository`.
+
+The trait includes:
+
+[source,rust]
+----
+add_job()
+update_job()
+delete_job()
+load_jobs()
+----
+
+Why this is good:
+
+The UI and app logic depend on a repository interface rather than directly depending everywhere on SQLite. This makes future testing and replacement easier.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add search/filter at database level
+|Add a method such as `search_jobs(&self, query: &str)`.
+
+|Add archive support
+|Add `archive_job(id)` or update existing job fields.
+
+|Add import/export persistence
+|Add trait methods only if persistence needs to own that behaviour.
+
+|===
+
+=== `src/repository/sqlite.rs`
+
+This is the SQLite implementation.
+
+Responsibilities:
+
+* Opens the SQLite database.
+* Creates parent directories if required.
+* Initializes the schema.
+* Inserts jobs.
+* Updates jobs.
+* Deletes jobs.
+* Loads jobs ordered by newest ID first.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change sort order
+|Change `ORDER BY id DESC` in `load_jobs()`.
+
+|Add a field
+|Update `INSERT`, `UPDATE`, and `SELECT`.
+
+|Add filtering
+|Add a new query method or change `load_jobs()`.
+
+|Improve delete safety
+|Check affected row count from `execute()`.
+
+|===
+
+Potential improvement:
+
+`delete_job()` currently treats deleting a non-existing ID as success because SQLite `DELETE` can affect zero rows without error. That is acceptable for simple apps, but if you want stricter behaviour, check the affected row count.
+
+=== `src/repository/schema.rs`
+
+This creates and migrates the database schema.
+
+Responsibilities:
+
+* Creates the `jobs` table if missing.
+* Adds a `comments` column if the table exists without it.
+* Checks existing columns using `PRAGMA table_info`.
+
+Current fields:
+
+* `id`
+* `company`
+* `title`
+* `status`
+* `applied_on`
+* `comments`
+* `created_at`
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add a new database column
+|Add it to the `CREATE TABLE` statement and add migration logic.
+
+|Rename a field
+|Usually requires a migration, not only code changes.
+
+|Add indexes
+|Add `CREATE INDEX IF NOT EXISTS ...`.
+
+|Add constraints
+|Update the schema and possibly validation logic.
+
+|===
+
+Example: adding `location`
+
+[source,sql]
+----
+ALTER TABLE jobs ADD COLUMN location TEXT NOT NULL DEFAULT '';
+----
+
+Also update mapper, insert, update, model, form, and row UI.
+
+=== `src/repository/mapper.rs`
+
+This converts SQLite rows into `Job` structs.
+
+Responsibilities:
+
+* Reads each column from a database row.
+* Converts status text into the `Status` enum.
+* Maps invalid status values into a SQLite conversion error.
+
+What to change here:
+
+Add new field mappings whenever `Job` or the database schema changes.
+
+Example:
+
+[source,rust]
+----
+location: row.get(6)?,
+----
+
+=== `src/stats.rs`
+
+This file calculates pipeline stats from jobs.
+
+Responsibilities:
+
+* Counts total jobs.
+* Counts jobs by status.
+* Calculates status percentages.
+
+This is clean domain logic and does not depend on `iced`.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add new status
+|Update the fixed array length issue.
+
+|Add conversion rate
+|Add methods such as `interview_rate()`.
+
+|Add rejection rate
+|Add a method using `count_for(Status::Rejected) / total`.
+
+|Add time-based stats
+|Probably create a separate stats type or extend this one.
+
+|===
+
+Potential improvement:
+
+Avoid hardcoding the number of statuses as `4`. That will make the app more flexible.
+
+=== `src/heatmap.rs`
+
+This builds application count data by date.
+
+Responsibilities:
+
+* Counts jobs per `applied_on` date.
+* Reports active days.
+* Reports peak daily count.
+* Exposes cells for UI rendering.
+
+This is also good domain logic because it is not tied to `iced`.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Show empty days too
+|Change `cells()` to generate a date range instead of only existing dates.
+
+|Group by week/month
+|Add new aggregation methods.
+
+|Filter by year
+|Add a method that filters dates before counting.
+
+|===
+
+Potential improvement:
+
+The current heatmap shows only days that have applications. A more calendar-like heatmap would include empty days as zero-count cells.
+
+=== `src/sankey.rs`
+
+This generates an SVG pipeline visual.
+
+Responsibilities:
+
+* Converts `Stats` into a `SankeyGraph`.
+* Generates SVG text.
+* Uses status colours for SVG styling.
+* Shows a no-applications message if total is zero.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change SVG size
+|Edit the root `<svg>` dimensions.
+
+|Change flow widths
+|Change the width calculation.
+
+|Change labels
+|Change the SVG text generation.
+
+|Add arrows/curves
+|Replace or extend the current SVG shape logic.
+
+|===
+
+Potential improvement:
+
+At the moment, the Sankey is more like a status summary flow visual than a true transition Sankey. A true Sankey would need historical movement between statuses, e.g. `Applied -> Interviewing -> Offer`.
+
+== UI State Files
+
+=== `src/ui_state/mod.rs`
+
+This groups the UI-state modules.
+
+Responsibilities:
+
+* Declares `animation`, `calendar`, and `panel`.
+* Re-exports `AnimationState`, `CalendarState`, and `ActivePanel`.
+
+What to change here:
+
+When adding new UI state types, add and re-export them here.
+
+=== `src/ui_state/panel.rs`
+
+This defines which major panel is active.
+
+Current panels:
+
+* `Jobs`
+* `Stats`
+
+Responsibilities:
+
+* Defines `ActivePanel`.
+* Provides `shows_stats()` to decide whether stats animation should run.
+
+What to change here:
+
+To add a new panel, add a new enum variant.
+
+Example:
+
+[source,rust]
+----
+pub enum ActivePanel {
+    Jobs,
+    Stats,
+    Settings,
+}
+----
+
+Then update:
+
+* `ui/mod.rs` panel selector
+* `ui/mod.rs` panel buttons
+* `JobTracker::active_panel` default if needed
+* Any animation/subscription logic if the new panel needs ticks
+
+=== `src/ui_state/animation.rs`
+
+This stores simple animation state for progress bars.
+
+Responsibilities:
+
+* Stores an animation step.
+* Advances the step.
+* Adds a small animated bump to bar values.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Make animation smoother
+|Increase `MAX_STEP` or reduce tick duration in `app.rs`.
+
+|Make animation slower
+|Increase the duration in `subscription()`.
+
+|Disable animation
+|Remove tick subscription and use raw percentage values.
+
+|===
+
+Current tick interval is controlled in `app.rs`, not here.
+
+=== `src/ui_state/calendar.rs`
+
+This stores the selected calendar date.
+
+Responsibilities:
+
+* Parse a date string.
+* Return selected date as `YYYY-MM-DD`.
+* Move to previous/next month.
+* Clamp day when changing months.
+* Calculate days in month.
+* Calculate leading blank days for calendar layout.
+* Handle leap years.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change date format
+|Change `from_date()` and `selected_date()`.
+
+|Start calendar week on Sunday
+|Change `leading_blank_days()` and UI labels.
+
+|Restrict future dates
+|Add validation in `select_day()`.
+
+|Add min/max date
+|Add fields or validation logic here.
+
+|===
+
+== UI Files
+
+=== `src/ui/mod.rs`
+
+This is the top-level UI layout.
+
+Responsibilities:
+
+* Chooses which major panel to display.
+* Renders the hero/header section.
+* Renders panel navigation buttons.
+* Wraps content in a scrollable container.
+* Sets the app background colour.
+* Provides a shared `panel()` wrapper for major content cards.
+
+Important layout:
+
+[source,rust]
+----
+column![
+    hero(),
+    row![
+        panel_button("Applications", ActivePanel::Jobs, app.active_panel),
+        panel_button("Stats", ActivePanel::Stats, app.active_panel),
+        Space::new().width(Fill),
+    ],
+    active_panel,
+]
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change app background colour
+|The final `container(scrollable(content))` style.
+
+|Change title/subtitle
+|`hero()`.
+
+|Add a new top-level panel
+|Match on `ActivePanel` and add another `panel_button`.
+
+|Change outer page padding
+|The `.padding(24)` on `content`.
+
+|Change spacing between major sections
+|The `.spacing(18)` on `content`.
+
+|===
+
+Example: adding a Settings panel
+
+[source,rust]
+----
+let active_panel = match app.active_panel {
+    ActivePanel::Jobs => jobs::panel(app),
+    ActivePanel::Stats => stats::panel(&app.jobs, app.animation),
+    ActivePanel::Settings => settings::panel(app),
+};
+----
+
+Then add another button:
+
+[source,rust]
+----
+panel_button("Settings", ActivePanel::Settings, app.active_panel)
+----
+
+=== `src/ui/colors.rs`
+
+This is a small colour utility file.
+
+Responsibilities:
+
+* Defines shared text colour.
+* Defines shared blue accent colour.
+* Converts hex strings to `iced::Color`.
+
+Current constants:
+
+[source,rust]
+----
+pub const TEXT: Color = ...
+pub const BLUE: Color = ...
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change the main accent blue
+|Change `BLUE`.
+
+|Change the default text colour
+|Change `TEXT`.
+
+|Use a different theme palette
+|Add more constants such as `BACKGROUND`, `PANEL`, `CARD`, `BORDER`.
+
+|===
+
+Recommended improvement:
+
+Move more colours here from `style.rs` and `buttons.rs`.
+
+For example:
+
+[source,rust]
+----
+pub const BACKGROUND: Color = Color::from_rgb8(3, 9, 20);
+pub const PANEL: Color = Color::from_rgb8(10, 22, 44);
+pub const CARD: Color = Color::from_rgb8(15, 30, 58);
+pub const BORDER: Color = Color::from_rgb8(59, 130, 246);
+----
+
+Then UI files can depend on named theme constants rather than scattered RGB values.
+
+=== `src/ui/style.rs`
+
+This defines container styles and status styles.
+
+Responsibilities:
+
+* Styles the hero panel.
+* Styles normal panels.
+* Styles accent cards.
+* Styles calendar dropdown.
+* Styles calendar empty cells and labels.
+* Styles status badges.
+* Styles heatmap cells.
+* Defines shared border and shadow logic.
+
+This is one of the most important files for changing the look of the app.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change panel background
+|Change `PANEL` or `base_panel()`.
+
+|Change card background
+|Change `CARD` or `accent_panel()`.
+
+|Change border radius
+|Change `border()`.
+
+|Change shadow strength
+|Change `base_panel()` shadow.
+
+|Change calendar style
+|Change `calendar_panel()`, `calendar_empty_cell()`, and `calendar_label()`.
+
+|Change heatmap appearance
+|Change `heatmap_cell()`.
+
+|Change status badge colours
+|Usually change `Status::colours()` in `status.rs`.
+
+|===
+
+Example: making cards less rounded
+
+[source,rust]
+----
+fn border(color: Color) -> Border {
+    Border::default().rounded(8).width(1).color(color)
+}
+----
+
+Example: removing shadows
+
+[source,rust]
+----
+.shadow(Shadow {
+    color: Color::TRANSPARENT,
+    offset: Vector::new(0.0, 0.0),
+    blur_radius: 0.0,
+})
+----
+
+=== `src/ui/buttons.rs`
+
+This defines button styles.
+
+Current button styles:
+
+* `blue`
+* `ghost`
+* `danger`
+* `calendar_nav`
+* `calendar_day`
+
+Responsibilities:
+
+* Customises button background by hover/press/default state.
+* Sets text colour.
+* Applies rounded pill borders.
+* Applies shadows.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change primary button colour
+|`blue()`.
+
+|Change secondary/ghost buttons
+|`ghost()`.
+
+|Change delete button colour
+|`danger()`.
+
+|Change calendar selected day style
+|`calendar_day()`.
+
+|Make buttons square instead of pill-shaped
+|Change `.rounded(999)` in `base()`.
+
+|Remove button shadows
+|Change `style.shadow` in `base()`.
+
+|===
+
+Example: less rounded buttons
+
+[source,rust]
+----
+style.border = Border::default()
+    .rounded(8)
+    .width(1)
+    .color(...);
+----
+
+=== `src/ui/form.rs`
+
+This renders the add/edit form.
+
+Responsibilities:
+
+* Shows the form title.
+* Shows company input.
+* Shows job title input.
+* Shows status picker.
+* Shows application date input.
+* Shows calendar toggle.
+* Shows comments input.
+* Shows save/update button.
+* Shows notice text.
+* Shows calendar dropdown when open.
+
+Important layout:
+
+[source,rust]
+----
+row![
+    text_input("Company", ...),
+    text_input("Job title", ...),
+    pick_list(...),
+]
+----
+
+Then:
+
+[source,rust]
+----
+row![
+    text_input("Application date", ...),
+    button("Calendar"),
+    text_input("Comments", ...),
+]
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change input order
+|Reorder widgets inside the `row![]` macros.
+
+|Change form title
+|`header()`.
+
+|Change button text
+|`save_button()`.
+
+|Add a new input field
+|Add it to `JobForm`, then add a `text_input` here.
+
+|Make form vertical instead of two rows
+|Replace rows with a single `column![]`.
+
+|Move comments to a larger area
+|Use a larger input approach or split it into its own row.
+
+|===
+
+Example: adding a `Location` input
+
+You would add a `LocationChanged(String)` message, add a `location` field to `JobForm`, then add:
+
+[source,rust]
+----
+text_input("Location", &app.form.location)
+    .on_input(Message::LocationChanged)
+    .padding(12)
+----
+
+=== `src/ui/jobs.rs`
+
+This renders the Applications panel.
+
+Responsibilities:
+
+* Combines the form panel and job list.
+* Shows tracked job count.
+* Shows an empty state if no jobs exist.
+* Renders each job row.
+* Renders Edit and Delete buttons.
+* Renders status badges.
+
+Important functions:
+
+[source,rust]
+----
+panel(app)
+row_view(job)
+comment_text(job)
+action(...)
+status_badge(status)
+empty_state()
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change job row layout
+|`row_view()`.
+
+|Change displayed job fields
+|`row_view()`.
+
+|Change empty state text
+|`empty_state()`.
+
+|Change edit/delete buttons
+|`action()` calls inside `row_view()`.
+
+|Change status badge placement
+|Move `status_badge(job.status)` in `row_view()`.
+
+|Add icons
+|Replace button labels or text with icon widgets if using an icon font/crate.
+
+|===
+
+Example: putting status under the title
+
+Move:
+
+[source,rust]
+----
+status_badge(job.status)
+----
+
+inside the inner `column![]` instead of the outer `row![]`.
+
+=== `src/ui/stats.rs`
+
+This renders the Stats panel.
+
+Responsibilities:
+
+* Builds `Stats` from jobs.
+* Shows the export button.
+* Shows the heatmap.
+* Shows summary cards.
+* Shows progress bars by status.
+* Uses animation state for progress bars.
+
+Important functions:
+
+[source,rust]
+----
+panel(jobs, animation)
+cards(stats)
+stat_card(label, value)
+graph_row(stats, status, animation)
+----
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Add a new stat card
+|Add another `stat_card(...)` in `cards()`.
+
+|Change card size/style
+|`stat_card()`.
+
+|Change progress bar labels
+|`graph_row()`.
+
+|Change progress bar colour
+|`graph_row()`, or status colours in `status.rs`.
+
+|Remove heatmap from stats
+|Remove `heatmap::panel(jobs)` from `panel()`.
+
+|Add another chart
+|Add another function and push it into the main `column![]`.
+
+|===
+
+Potential improvement:
+
+The status rows are manually listed one by one. Better long-term design:
+
+[source,rust]
+----
+Status::all()
+    .into_iter()
+    .fold(column![], |col, status| {
+        col.push(graph_row(&stats, status, animation))
+    })
+----
+
+That way, adding a new status automatically updates the stats panel.
+
+=== `src/ui/calendar.rs`
+
+This renders the inline calendar dropdown.
+
+Responsibilities:
+
+* Shows current month/year.
+* Shows selected date.
+* Shows previous/next month buttons.
+* Renders weekday labels.
+* Renders six calendar rows.
+* Renders day buttons.
+* Renders blank cells.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change weekday labels
+|`labels()`.
+
+|Change month header
+|`header()`.
+
+|Change previous/next symbols
+|`nav("<", ...)` and `nav(">", ...)`.
+
+|Change number of displayed weeks
+|The `(0..6)` range in `dropdown()`.
+
+|Change day cell size
+|`day_cell()` padding and width.
+
+|Change selected day style
+|`buttons::calendar_day()`.
+
+|===
+
+Potential improvement:
+
+The calendar is simple and effective. If you later want keyboard navigation or date disabling, this file and `CalendarState` are the main places to edit.
+
+=== `src/ui/month.rs`
+
+This maps month numbers to names.
+
+Responsibilities:
+
+* Converts `1` to `"January"`, `2` to `"February"`, etc.
+* Falls back to `"Month"` for invalid values.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Use short month names
+|Change strings to `Jan`, `Feb`, etc.
+
+|Localise month names
+|Change strings to another language.
+
+|Show numeric month only
+|Stop calling this function in `calendar.rs`.
+
+|===
+
+=== `src/ui/heatmap.rs`
+
+This renders heatmap data.
+
+Responsibilities:
+
+* Converts jobs into `ApplicationHeatmap`.
+* Shows active-day and peak-count summary.
+* Renders cells in rows of 14.
+* Styles each cell by count intensity.
+
+What to change here:
+
+[cols="1,2", options="header"]
+|===
+|Goal |Where to change
+
+|Change cells per row
+|Change `.chunks(14)`.
+
+|Show dates inside cells
+|Update `cell(date, count, max)`.
+
+|Show tooltip-like labels
+|Iced does not have browser tooltips by default; add selected/hover state manually.
+
+|Change colour intensity
+|`style::heatmap_cell()`.
+
+|Hide heatmap when empty
+|Change `panel()` or `cells()`.
+
+|===
+
+Potential improvement:
+
+Currently `_date` is unused in `cell()`. You could display the date, a shortened day number, or use it for accessibility/help text.
+
+== How to Change the UI
+
+=== Change the app title
+
+In `src/app.rs`:
+
+[source,rust]
+----
+.title("Job Tracker")
+----
+
+Change it to:
+
+[source,rust]
+----
+.title("Application Pipeline")
+----
+
+=== Change the hero text
+
+In `src/ui/mod.rs`, edit `hero()`:
+
+[source,rust]
+----
+text("Job Tracker").size(40)
+text("A focused pipeline for applications, notes, dates, and outcomes.").size(16)
+----
+
+=== Change page spacing and padding
+
+In `src/ui/mod.rs`, edit the main `content` column:
+
+[source,rust]
+----
+.spacing(18)
+.padding(24)
+----
+
+For a tighter UI:
+
+[source,rust]
+----
+.spacing(12)
+.padding(16)
+----
+
+For a roomier UI:
+
+[source,rust]
+----
+.spacing(24)
+.padding(32)
+----
+
+=== Change form layout
+
+The form is mostly controlled by `src/ui/form.rs`.
+
+Current design:
+
+* First row: company, title, status.
+* Second row: date, calendar button, comments.
+
+To make it more vertical, replace the row groups with individual widgets inside the main `column![]`.
+
+Example structure:
+
+[source,rust]
+----
+column![
+    header(app.form.is_editing()),
+    text_input("Company", &app.form.company),
+    text_input("Job title", &app.form.title),
+    pick_list(...),
+    text_input("Application date", &app.application_date()),
+    text_input("Comments", &app.form.comments),
+    save_button(app.form.is_editing()),
+]
+----
+
+=== Change job row layout
+
+Edit `src/ui/jobs.rs`, especially `row_view()`.
+
+Current row structure:
+
+* Left side: company, title/date, comments.
+* Right side: status badge, edit button, delete button.
+
+To make rows more card-like, move the action buttons into a second row:
+
+[source,rust]
+----
+container(
+    column![
+        row![
+            text(&job.company).size(18),
+            Space::new().width(Fill),
+            status_badge(job.status),
+        ],
+        text(format!("{} - {}", job.title, job.applied_on)).size(13),
+        comment_text(job),
+        row![
+            action("Edit", id.map(Message::EditJob), buttons::ghost),
+            action("Delete", id.map(Message::DeleteJob), buttons::danger),
+        ],
+    ]
+)
+----
+
+== How to Change Colours
+
+=== Fastest way
+
+Change these files:
+
+* `src/ui/colors.rs`
+* `src/ui/style.rs`
+* `src/ui/buttons.rs`
+* `src/model/status.rs`
+
+=== Change main accent colour
+
+In `src/ui/colors.rs`:
+
+[source,rust]
+----
+pub const BLUE: Color = Color::from_rgb(0.23, 0.51, 0.96);
+----
+
+Change it to a different colour.
+
+Example: purple accent
+
+[source,rust]
+----
+pub const BLUE: Color = Color::from_rgb8(139, 92, 246);
+----
+
+You may want to rename `BLUE` to `ACCENT` later.
+
+=== Change background colour
+
+In `src/ui/mod.rs`, change:
+
+[source,rust]
+----
+container::background(iced::Color::from_rgb8(3, 9, 20))
+----
+
+Better long-term approach:
+
+Move it into `colors.rs`:
+
+[source,rust]
+----
+pub const BACKGROUND: Color = Color::from_rgb8(3, 9, 20);
+----
+
+Then use:
+
+[source,rust]
+----
+container::background(colors::BACKGROUND)
+----
+
+=== Change panel/card colours
+
+In `src/ui/style.rs`:
+
+[source,rust]
+----
+const PANEL: Color = Color::from_rgb(0.04, 0.09, 0.18);
+const CARD: Color = Color::from_rgb(0.06, 0.12, 0.23);
+----
+
+These control the main dark surfaces.
+
+=== Change status colours
+
+In `src/model/status.rs`, edit:
+
+[source,rust]
+----
+pub const fn colours(self) -> StatusColours
+----
+
+For example, `Status::Interviewing` currently has its own background, border, and text colours. Change those hex values to alter badges, progress bars, and SVG colours.
+
+=== Suggested cleaner theme structure
+
+Create a theme palette like this in `src/ui/colors.rs`:
+
+[source,rust]
+----
+pub const BACKGROUND: Color = Color::from_rgb8(3, 9, 20);
+pub const PANEL: Color = Color::from_rgb8(10, 22, 44);
+pub const CARD: Color = Color::from_rgb8(15, 30, 58);
+pub const TEXT: Color = Color::from_rgb8(226, 232, 240);
+pub const MUTED_TEXT: Color = Color::from_rgb8(148, 163, 184);
+pub const ACCENT: Color = Color::from_rgb8(59, 130, 246);
+pub const DANGER: Color = Color::from_rgb8(190, 18, 60);
+----
+
+Then update `style.rs` and `buttons.rs` to use these names.
+
+== How to Add a New Panel
+
+Example: add a `Settings` panel.
+
+=== Step 1: Add a new panel enum variant
+
+In `src/ui_state/panel.rs`:
+
+[source,rust]
+----
+pub enum ActivePanel {
+    Jobs,
+    Stats,
+    Settings,
+}
+----
+
+=== Step 2: Add a message path if needed
+
+You already have:
+
+[source,rust]
+----
+Message::ShowPanel(ActivePanel)
+----
+
+So you probably do not need a new message.
+
+=== Step 3: Create a new UI file
+
+Create:
+
+[source,text]
+----
+src/ui/settings.rs
+----
+
+Example:
+
+[source,rust]
+----
+use crate::{app::JobTracker, message::Message};
+use iced::widget::{column, text};
+use iced::Element;
+
+pub fn panel(app: &JobTracker) -> Element<'_, Message> {
+    super::panel(
+        column![
+            text("Settings").size(24),
+            text("Settings panel goes here").size(14),
+        ]
+        .spacing(12),
+    )
+}
+----
+
+=== Step 4: Register the module
+
+In `src/ui/mod.rs`:
+
+[source,rust]
+----
+mod settings;
+----
+
+=== Step 5: Add it to the panel switch
+
+In `src/ui/mod.rs`:
+
+[source,rust]
+----
+let active_panel = match app.active_panel {
+    ActivePanel::Jobs => jobs::panel(app),
+    ActivePanel::Stats => stats::panel(&app.jobs, app.animation),
+    ActivePanel::Settings => settings::panel(app),
+};
+----
+
+=== Step 6: Add the navigation button
+
+In `src/ui/mod.rs`, add:
+
+[source,rust]
+----
+panel_button("Settings", ActivePanel::Settings, app.active_panel)
+----
+
+=== Step 7: Decide whether it needs animation
+
+If the new panel needs timer ticks, update:
+
+[source,rust]
+----
+subscription()
+----
+
+in `src/app.rs`.
+
+== How to Add a Side Panel
+
+A side panel would be useful for details, filters, or editing.
+
+=== Option A: Add a right-side detail panel to Applications
+
+Edit `src/ui/jobs.rs`.
+
+Current high-level structure is a column:
+
+[source,rust]
+----
+column![
+    form::panel(app),
+    header_row,
+    job_list,
+]
+----
+
+You can change it into a row:
+
+[source,rust]
+----
+row![
+    column![
+        form::panel(app),
+        jobs_list,
+    ]
+    .width(Length::FillPortion(2)),
+
+    details_panel(app)
+        .width(Length::FillPortion(1)),
+]
+.spacing(16)
+----
+
+Then create:
+
+[source,rust]
+----
+fn details_panel<'a>(app: &'a JobTracker) -> Element<'a, Message> {
+    super::panel(
+        column![
+            text("Details").size(24),
+            text("Select or edit a job to see details here.").size(14),
+        ]
+        .spacing(10),
+    )
+}
+----
+
+=== Option B: Add a filter side panel
+
+Add new state to `JobTracker`:
+
+[source,rust]
+----
+pub filter_status: Option<Status>,
+pub search_query: String,
+----
+
+Add messages:
+
+[source,rust]
+----
+SearchChanged(String),
+FilterStatusChanged(Option<Status>),
+----
+
+Handle them in `update()`.
+
+Render a filter panel in `jobs.rs`.
+
+== How to Add a New Field
+
+Example: add `location`.
+
+=== Files to update
+
+[cols="1,2", options="header"]
+|===
+|File |Change
+
+|`src/model/job.rs`
+|Add `location` to `Job` and `JobForm`.
+
+|`src/message.rs`
+|Add `LocationChanged(String)`.
+
+|`src/app.rs`
+|Handle `Message::LocationChanged(v)`.
+
+|`src/ui/form.rs`
+|Add a location text input.
+
+|`src/ui/jobs.rs`
+|Display location in each job row.
+
+|`src/repository/schema.rs`
+|Add a column and migration.
+
+|`src/repository/sqlite.rs`
+|Update insert, update, and select queries.
+
+|`src/repository/mapper.rs`
+|Read the column into `Job`.
+
+|Tests
+|Update model/repository tests.
+
+|===
+
+This is the normal cost of adding a field in a strongly typed app with persistence.
+
+== How to Add Search
+
+=== Step 1: Add state
+
+In `JobTracker`:
+
+[source,rust]
+----
+pub search_query: String,
+----
+
+Initialize it in `empty()`:
+
+[source,rust]
+----
+search_query: String::new(),
+----
+
+=== Step 2: Add a message
+
+In `message.rs`:
+
+[source,rust]
+----
+SearchChanged(String),
+----
+
+=== Step 3: Handle it
+
+In `app.rs`:
+
+[source,rust]
+----
+Message::SearchChanged(v) => self.search_query = v,
+----
+
+=== Step 4: Add search input
+
+In `ui/jobs.rs`:
+
+[source,rust]
+----
+text_input("Search company or role", &app.search_query)
+    .on_input(Message::SearchChanged)
+    .padding(12)
+----
+
+=== Step 5: Filter jobs before rendering
+
+In `ui/jobs.rs`, before folding rows:
+
+[source,rust]
+----
+let query = app.search_query.to_lowercase();
+
+let visible_jobs = app.jobs.iter().filter(|job| {
+    query.is_empty()
+        || job.company.to_lowercase().contains(&query)
+        || job.title.to_lowercase().contains(&query)
+});
+----
+
+Then fold over `visible_jobs`.
+
+== How to Add Filters
+
+Example: filter by status.
+
+=== Add state
+
+[source,rust]
+----
+pub filter_status: Option<Status>,
+----
+
+=== Add messages
+
+[source,rust]
+----
+FilterStatusChanged(Option<Status>),
+ClearFilter,
+----
+
+=== Add UI
+
+Use `pick_list` with statuses.
+
+You may need to create a small wrapper enum if `pick_list` needs a non-optional list item like `"All"`.
+
+Simpler approach:
+
+* Add status filter buttons:
+** All
+** Applied
+** Interviewing
+** Rejected
+** Pending
+
+Each button sends a message that sets the filter.
+
+== How to Add More Stats
+
+Examples:
+
+* Interview rate
+* Rejection rate
+* Pending rate
+* Applications this month
+* Applications this week
+
+=== Best place to add logic
+
+Put pure calculation logic in:
+
+[source,text]
+----
+src/stats.rs
+----
+
+Example:
+
+[source,rust]
+----
+pub fn rejection_rate(&self) -> f32 {
+    self.percentage_for(Status::Rejected)
+}
+----
+
+=== Best place to display it
+
+Put UI display logic in:
+
+[source,text]
+----
+src/ui/stats.rs
+----
+
+Add a new card:
+
+[source,rust]
+----
+stat_card("Rejected %", format!("{:.0}%", stats.rejection_rate() * 100.0))
+----
+
+You may need to change `stat_card` from `usize` to something more flexible, such as `impl ToString`.
+
+== How to Improve the Project
+
+=== 1. Centralise all design tokens
+
+Right now, colours are partly centralised but not fully. Text sizes, padding, spacing, border radius, and some colours are scattered.
+
+Add a `theme.rs` or expand `colors.rs`.
+
+Example:
+
+[source,rust]
+----
+pub const PAGE_PADDING: u16 = 24;
+pub const SECTION_SPACING: u16 = 18;
+pub const CARD_PADDING: u16 = 20;
+pub const BORDER_RADIUS: f32 = 16.0;
+----
+
+This makes UI changes much easier.
+
+=== 2. Remove fixed status count assumptions
+
+`Stats` assumes four statuses. This is okay now, but it makes adding a fifth status more annoying.
+
+A more scalable structure:
+
+[source,rust]
+----
+pub struct Stats {
+    pub total: usize,
+    counts: Vec<(Status, usize)>,
+}
+----
+
+Or use a map:
+
+[source,rust]
+----
+HashMap<Status, usize>
+----
+
+Since `Status::all()` already exists, a vector is probably enough.
+
+=== 3. Add filtering/search before the app grows
+
+A job tracker becomes much more useful with search and filtering.
+
+Recommended filters:
+
+* Status
+* Company
+* Applied date range
+* Text search over company/title/comments
+
+=== 4. Improve the heatmap
+
+The current heatmap is useful, but it only shows days that have activity.
+
+Better versions:
+
+* Calendar-like monthly heatmap.
+* GitHub-style contribution heatmap.
+* Grouped by week.
+* Hover/selected date details.
+
+=== 5. Improve testability of app actions
+
+The repository trait is good, but `JobTracker` currently stores `Option<SqliteJobRepository>` specifically.
+
+For stronger testability, you could make the app generic over a repository trait or use a boxed trait object:
+
+[source,rust]
+----
+Box<dyn JobRepository>
+----
+
+However, because GUI state and lifetimes can get more complex, this is not urgent for a small app.
+
+=== 6. Improve empty/error states
+
+Current notices are simple strings. You could make them structured:
+
+[source,rust]
+----
+enum Notice {
+    Success(String),
+    Error(String),
+    Info(String),
+}
+----
+
+Then render them with different colours.
+
+=== 7. Add confirmation before delete
+
+Currently, delete appears to happen immediately.
+
+A safer flow:
+
+* Click Delete.
+* Store `pending_delete_id`.
+* Show confirmation panel or inline buttons.
+* Confirm delete sends final delete message.
+* Cancel clears pending delete.
+
+== Suggested Next Roadmap
+
+=== Stage 1: UI polish
+
+* Rename `BLUE` to `ACCENT`.
+* Centralise palette values.
+* Centralise spacing/padding constants.
+* Make job rows more card-like.
+* Add a clearer success/error notice style.
+
+=== Stage 2: Job management features
+
+* Add search.
+* Add status filters.
+* Add location field.
+* Add salary/range field if useful.
+* Add link field for job posting URL.
+
+=== Stage 3: Data and analytics
+
+* Add applications per week/month.
+* Add success/interview/rejection rates.
+* Improve heatmap.
+* Export CSV.
+* Add import/backup.
+
+=== Stage 4: Structure improvements
+
+* Make status count logic dynamic.
+* Add more tests around `JobForm`, `Stats`, `ApplicationHeatmap`, and repository migrations.
+* Consider structured notices.
+* Consider delete confirmation state.
+
+== Summary
+
+This is a good small Rust GUI app. The most impressive part is the separation of concerns: the domain model, repository, UI state, app actions, and UI files are not all mixed together. That makes the app much easier to explain and extend.
+
+The main thing I would improve next is the UI/theme architecture. Right now, the app is visually coherent, but design values are scattered across `colors.rs`, `style.rs`, `buttons.rs`, and individual UI files. Centralising those values will make it much easier to experiment with a new look, add panels, and adjust spacing without hunting through the whole codebase.
+
+The app is already in a good state for learning `iced` because it demonstrates the core pattern clearly:
+
+[source,text]
+----
+Message -> update state -> render view -> persist through repository
+----
+
+That is exactly the mental model you want for building more serious Rust GUI apps with `iced`.
